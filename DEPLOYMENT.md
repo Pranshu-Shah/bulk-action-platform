@@ -43,6 +43,10 @@ start command minimal) — either approach is correct.
 
 ## 3. Worker service (Celery)
 
+There are two ways to run the worker, depending on budget.
+
+### Paid plan: separate Background Worker service (recommended)
+
 A second service, same repo, same environment variables, different
 start command:
 
@@ -59,6 +63,45 @@ generally the better choice for a production Linux deployment. Use
 `--pool=threads` only if there's a specific reason to prefer it (e.g.
 memory constraints — prefork's separate processes use more memory than
 threads sharing one process).
+
+### Free tier: combined into the web service
+
+Render's free tier only provides a free instance for **Web Services**
+(and static sites) — its **Background Worker** service type requires a
+paid plan. Without paying, run the Celery worker as a background process
+inside the same web service container instead of as a separate service.
+Use this as the web service's **Start Command** (replacing the one in
+Step 2), and skip creating a separate worker service entirely:
+
+```
+alembic upgrade head && python -m app.commands.seed_contacts && (celery -A app.workers.celery_app.celery worker --loglevel=info --concurrency=4 &) && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+In order: migrations run and must succeed, then seeding (idempotent, so
+safe on every boot), then the Celery worker is launched in the
+background (`&` inside `(...)` so launching it doesn't block the rest
+of the chain), then uvicorn runs in the foreground as the container's
+main process — this is the one Render actually monitors for the port
+binding.
+
+**Trade-offs of this approach, worth knowing before relying on it**:
+- Render's free web services spin down after a period of no incoming
+  HTTP traffic. When that happens, the *entire* container stops —
+  uvicorn and the backgrounded Celery worker together. A bulk action
+  dispatched right before the service goes idle sits unprocessed until
+  the next request wakes the service back up.
+- If the backgrounded Celery process crashes, nothing restarts it —
+  Render's health check only watches whether uvicorn is answering on
+  `$PORT`, not whether Celery is still alive underneath it. A redeploy
+  or manual restart is the only recovery.
+- Web and worker capacity can no longer scale independently — they're
+  the same instance now.
+
+None of this affects correctness (the item-level idempotency design
+means a worker that stopped mid-batch and later resumed just picks up
+where it left off), but it does mean background processing isn't
+continuously available the way a dedicated worker instance would be.
+Move to the separate-service setup above once that matters.
 
 ## 4. Environment variables (both services)
 
@@ -84,17 +127,17 @@ values.
 
 1. Push to GitHub (`main` branch).
 2. Create the Postgres and Redis add-ons; note their connection strings.
-3. Create the web service pointing at the repo; set env vars; start
-   command includes the migrate-then-seed-then-serve chain from step 2
-   above.
-4. Create the worker service pointing at the same repo; same env vars;
-   start command is just the `celery` command from step 3 above (no
-   migrate/seed chain).
-5. Deploy. Confirm `GET /health` returns `{"status": "healthy"}`, and
+3. Create the web service pointing at the repo; set env vars.
+   - **Paid**: start command from Step 2; also create the separate
+     worker service from Step 3 ("paid plan" variant).
+   - **Free**: use the combined start command from Step 3's "free tier"
+     variant instead; don't create a worker service at all.
+4. Deploy. Confirm `GET /health` returns `{"status": "healthy"}`, and
    that contacts exist (e.g. via `GET /docs` and creating a bulk action
    against a small ID range) — the web service's first boot log should
    show `Inserted 5000 contacts` (or `already has N rows, skipping seed`
-   on every boot after that).
+   on every boot after that), and on the free-tier variant, the Celery
+   worker's own startup banner should appear in the same log stream.
 
 ## Scaling in production
 
