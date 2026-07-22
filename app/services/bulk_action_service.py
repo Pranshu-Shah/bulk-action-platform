@@ -1,3 +1,5 @@
+from datetime import datetime, UTC
+
 from sqlalchemy.orm import Session
 
 from app.workers.tasks import dispatch_bulk_action
@@ -45,6 +47,8 @@ class BulkActionService:
         entity_type: str,
         entity_ids: list[int],
         payload: dict,
+        account_id: int | None = None,
+        scheduled_at: datetime | None = None,
     ) -> BulkAction:
 
         # Validate action type - ActionRegistry is the source of truth for
@@ -90,23 +94,38 @@ class BulkActionService:
             if not isinstance(payload[ASSIGN_OWNER_FIELD], int):
                 raise InvalidPayloadError(f"'{ASSIGN_OWNER_FIELD}' must be an integer.")
 
+        # A scheduled_at in the past (or "now") is treated as "run
+        # immediately" - only a genuinely future timestamp defers dispatch.
+        is_scheduled = scheduled_at is not None and scheduled_at > datetime.now(UTC)
+
         # Create Bulk Action record. Target contact IDs are not stored on
         # this row - they're passed straight to the dispatcher task, which
         # snapshots them into `bulk_action_items`.
         bulk_action = BulkAction(
             action_type=action_type,
             entity_type=entity_type,
-            status=BulkActionStatus.QUEUED,
+            status=BulkActionStatus.SCHEDULED if is_scheduled else BulkActionStatus.QUEUED,
             payload=payload,
+            account_id=account_id,
+            scheduled_at=scheduled_at,
         )
 
         bulk_action = self.repository.create(bulk_action)
 
-        # Send task to Celery
-        dispatch_bulk_action.delay(
-            bulk_action.id,
-            entity_ids,
-        )
+        # Send task to Celery. A future scheduled_at uses Celery's own
+        # eta mechanism rather than a custom scheduler - dispatch_bulk_action
+        # already checks for CANCELLED as its very first step, so cancelling
+        # a scheduled-but-not-yet-started action works with no extra code.
+        if is_scheduled:
+            dispatch_bulk_action.apply_async(
+                args=[bulk_action.id, entity_ids],
+                eta=scheduled_at,
+            )
+        else:
+            dispatch_bulk_action.delay(
+                bulk_action.id,
+                entity_ids,
+            )
 
         return bulk_action
 
@@ -125,6 +144,7 @@ class BulkActionService:
         limit: int = 20,
         status: BulkActionStatus | None = None,
         action_type: str | None = None,
+        account_id: int | None = None,
         sort: str = "desc",
     ):
         return self.repository.list(
@@ -132,6 +152,7 @@ class BulkActionService:
             limit=limit,
             status=status,
             action_type=action_type,
+            account_id=account_id,
             sort=sort,
         )
 

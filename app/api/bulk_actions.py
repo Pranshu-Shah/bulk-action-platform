@@ -40,6 +40,8 @@ def create_bulk_action(
         entity_type=request.entity_type,
         entity_ids=request.entity_ids,
         payload=request.payload,
+        account_id=request.account_id,
+        scheduled_at=request.scheduled_at,
     )
 
 
@@ -52,6 +54,7 @@ def list_bulk_actions(
     limit: int = Query(20, ge=1, le=100),
     status: BulkActionStatus | None = None,
     action_type: str | None = None,
+    account_id: int | None = None,
     sort: str = Query("desc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
 ):
@@ -63,6 +66,7 @@ def list_bulk_actions(
         limit=limit,
         status=status,
         action_type=action_type,
+        account_id=account_id,
         sort=sort,
     )
 

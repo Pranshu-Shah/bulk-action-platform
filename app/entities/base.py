@@ -26,3 +26,12 @@ class BaseEntityRepository(ABC):
     @abstractmethod
     def get_updatable_fields(self) -> set[str]:
         """Field names bulk_update is allowed to overwrite on this entity type."""
+
+    def get_dedup_key(self, entity) -> object | None:
+        """
+        Value duplicate entities are detected by within one bulk action's
+        target list (e.g. email), or None if this entity type has no such
+        concept. Not abstract - most entity types won't need to override
+        this; it defaults to "no de-duplication."
+        """
+        return None

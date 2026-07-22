@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Bulk Action Platform",
-    "description": "API for running bulk operations (update, delete, archive, assign-owner, export) against Contacts at scale. Set the `baseUrl` variable, run a Create request, copy the returned `id` into the `bulk_action_id` variable, then use the status/stats/progress/logs/cancel requests.",
+    "description": "API for running bulk operations (update, delete, archive, assign-owner, export) against Contacts at scale. Set the `baseUrl` variable, run a Create request, copy the returned `id` into the `bulk_action_id` variable, then use the status/stats/progress/logs/cancel requests.\n\nEvery Create request also accepts two optional fields not shown in every example below: `account_id` (int) enables per-account rate limiting, and `scheduled_at` (ISO 8601 datetime) defers dispatch to a future time via Celery's eta mechanism. Duplicate targets sharing the same email within one request are automatically detected and skipped - no special field needed for that.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -115,6 +115,40 @@
           }
         },
         {
+          "name": "Create - Bulk Update (rate-limited by account)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action_type\": \"bulk_update\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1, 2, 3],\n  \"payload\": {\n    \"status\": \"INACTIVE\"\n  },\n  \"account_id\": 42\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions"]
+            },
+            "description": "account_id is optional - when present, each batch checks a per-account, per-minute Redis budget (RATE_LIMIT_PER_MINUTE, default 10k) before processing; over-budget batches back off and retry on the next window rather than failing. Omit account_id entirely to skip rate limiting."
+          }
+        },
+        {
+          "name": "Create - Bulk Update (scheduled for later)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action_type\": \"bulk_update\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1, 2, 3],\n  \"payload\": {\n    \"status\": \"INACTIVE\"\n  },\n  \"scheduled_at\": \"2026-12-31T23:00:00Z\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions"]
+            },
+            "description": "scheduled_at is optional - a future ISO 8601 timestamp starts the action with status=SCHEDULED and dispatches via Celery's apply_async(eta=...) instead of running immediately. Cancelling it (POST .../cancel) before that time works exactly like cancelling any other non-terminal action. Omit scheduled_at (or use a past timestamp) to dispatch immediately as before."
+          }
+        },
+        {
           "name": "Create - Unsupported action type (400 example)",
           "request": {
             "method": "POST",
@@ -149,10 +183,11 @@
                 { "key": "offset", "value": "0" },
                 { "key": "sort", "value": "desc", "description": "asc | desc, sorted by id" },
                 { "key": "status", "value": "COMPLETED", "disabled": true },
-                { "key": "action_type", "value": "bulk_update", "disabled": true }
+                { "key": "action_type", "value": "bulk_update", "disabled": true },
+                { "key": "account_id", "value": "42", "disabled": true }
               ]
             },
-            "description": "Paginated, filterable by status and/or action_type."
+            "description": "Paginated, filterable by status, action_type, and/or account_id."
           }
         },
         {

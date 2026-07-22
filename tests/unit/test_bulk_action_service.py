@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, UTC
+
 import pytest
 
 from app.core.exceptions import (
@@ -104,6 +106,76 @@ class TestCreateBulkActionValidation:
             payload={},
         )
         assert bulk_action.id is not None
+
+
+class TestScheduling:
+
+    def test_future_scheduled_at_uses_apply_async_with_eta(self, service, monkeypatch):
+        captured = {}
+
+        def fake_apply_async(args, eta):
+            captured["args"] = args
+            captured["eta"] = eta
+
+        monkeypatch.setattr(
+            "app.services.bulk_action_service.dispatch_bulk_action.apply_async",
+            fake_apply_async,
+        )
+
+        future = datetime.now(UTC) + timedelta(hours=1)
+
+        bulk_action = service.create_bulk_action(
+            action_type="bulk_update",
+            entity_type="contact",
+            entity_ids=[MISSING_CONTACT_ID],
+            payload={"status": "INACTIVE"},
+            scheduled_at=future,
+        )
+
+        assert bulk_action.status == BulkActionStatus.SCHEDULED
+        assert bulk_action.scheduled_at == future
+        assert captured["args"] == [bulk_action.id, [MISSING_CONTACT_ID]]
+        assert captured["eta"] == future
+
+    def test_past_scheduled_at_dispatches_immediately(self, service, monkeypatch):
+        captured = {}
+
+        def fake_delay(bulk_action_id, entity_ids):
+            captured["called_with"] = (bulk_action_id, entity_ids)
+
+        monkeypatch.setattr(
+            "app.services.bulk_action_service.dispatch_bulk_action.delay",
+            fake_delay,
+        )
+
+        past = datetime.now(UTC) - timedelta(hours=1)
+
+        bulk_action = service.create_bulk_action(
+            action_type="bulk_update",
+            entity_type="contact",
+            entity_ids=[MISSING_CONTACT_ID],
+            payload={"status": "INACTIVE"},
+            scheduled_at=past,
+        )
+
+        assert bulk_action.status == BulkActionStatus.QUEUED
+        assert captured["called_with"] == (bulk_action.id, [MISSING_CONTACT_ID])
+
+    def test_no_scheduled_at_behaves_as_before(self, service, monkeypatch):
+        monkeypatch.setattr(
+            "app.services.bulk_action_service.dispatch_bulk_action.delay",
+            lambda *a, **k: None,
+        )
+
+        bulk_action = service.create_bulk_action(
+            action_type="bulk_update",
+            entity_type="contact",
+            entity_ids=[MISSING_CONTACT_ID],
+            payload={"status": "INACTIVE"},
+        )
+
+        assert bulk_action.status == BulkActionStatus.QUEUED
+        assert bulk_action.scheduled_at is None
 
 
 class TestGetBulkAction:

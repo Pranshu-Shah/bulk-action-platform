@@ -28,6 +28,7 @@ class BulkActionRepository:
         limit: int = 20,
         status: BulkActionStatus | None = None,
         action_type: str | None = None,
+        account_id: int | None = None,
         sort: str = "desc",
     ) -> tuple[list[BulkAction], int]:
         """
@@ -42,6 +43,9 @@ class BulkActionRepository:
 
         if action_type is not None:
             query = query.filter(BulkAction.action_type == action_type)
+
+        if account_id is not None:
+            query = query.filter(BulkAction.account_id == account_id)
 
         total = query.count()
 

@@ -16,6 +16,11 @@ class BulkActionCreate(BaseModel):
 
     payload: dict[str, Any]
 
+    # Both optional/opt-in: omitting them preserves exactly today's
+    # behavior (no rate limiting, dispatched immediately).
+    account_id: int | None = None
+    scheduled_at: datetime | None = None
+
 
 class BulkActionResponse(BaseModel):
     id: int
@@ -33,6 +38,8 @@ class BulkActionStatusResponse(BaseModel):
 
     status: BulkActionStatus
 
+    account_id: int | None
+    scheduled_at: datetime | None
     started_at: datetime | None
     completed_at: datetime | None
 
