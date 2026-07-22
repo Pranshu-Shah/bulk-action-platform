@@ -55,6 +55,7 @@ def run(entity_count: int) -> None:
             "entity_type": "contact",
             "entity_ids": contact_ids,
             "payload": {"status": "ACTIVE"},
+            "account_id": 1,
         },
     )
     response.raise_for_status()
