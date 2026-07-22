@@ -1,0 +1,251 @@
+{
+  "info": {
+    "name": "Bulk Action Platform",
+    "description": "API for running bulk operations (update, delete, archive, assign-owner, export) against Contacts at scale. Set the `baseUrl` variable, run a Create request, copy the returned `id` into the `bulk_action_id` variable, then use the status/stats/progress/logs/cancel requests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8000", "type": "string" },
+    { "key": "bulk_action_id", "value": "1", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Bulk Actions - Create",
+      "item": [
+        {
+          "name": "Create - Bulk Update",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action_type\": \"bulk_update\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1, 2, 3],\n  \"payload\": {\n    \"status\": \"INACTIVE\",\n    \"age\": 30\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions"]
+            },
+            "description": "Overwrites the given fields (name/email/status/age) on each targeted contact. Payload must contain at least one updatable field."
+          }
+        },
+        {
+          "name": "Create - Bulk Delete (soft delete)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action_type\": \"bulk_delete\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [4, 5],\n  \"payload\": {}\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions"]
+            },
+            "description": "Sets status=\"DELETED\" on each targeted contact (soft delete - bulk_action_items keeps a permanent FK to contacts, so a hard delete isn't possible for any contact ever touched by a bulk action). No payload required."
+          }
+        },
+        {
+          "name": "Create - Bulk Archive",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action_type\": \"bulk_archive\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [6, 7],\n  \"payload\": {}\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions"]
+            },
+            "description": "Sets status=\"ARCHIVED\" on each targeted contact. No payload required."
+          }
+        },
+        {
+          "name": "Create - Bulk Assign Owner",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action_type\": \"bulk_assign_owner\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [8, 9],\n  \"payload\": {\n    \"owner_id\": 42\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions"]
+            },
+            "description": "Sets owner_id on each targeted contact. Payload must contain an integer owner_id."
+          }
+        },
+        {
+          "name": "Create - Bulk Export (log-only placeholder)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action_type\": \"bulk_export\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1, 2, 3],\n  \"payload\": {}\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions"]
+            },
+            "description": "No file/storage layer exists yet - writes each contact's field snapshot into bulk_logs instead of producing a downloadable file. No payload required."
+          }
+        },
+        {
+          "name": "Create - Unsupported action type (400 example)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action_type\": \"bulk_frobnicate\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1],\n  \"payload\": {}\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions"]
+            },
+            "description": "Expected: 400 Bad Request - \"Unsupported action type: bulk_frobnicate\""
+          }
+        }
+      ]
+    },
+    {
+      "name": "Bulk Actions - Read & Manage",
+      "item": [
+        {
+          "name": "List Bulk Actions",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions?limit=20&offset=0&sort=desc",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions"],
+              "query": [
+                { "key": "limit", "value": "20" },
+                { "key": "offset", "value": "0" },
+                { "key": "sort", "value": "desc", "description": "asc | desc, sorted by id" },
+                { "key": "status", "value": "COMPLETED", "disabled": true },
+                { "key": "action_type", "value": "bulk_update", "disabled": true }
+              ]
+            },
+            "description": "Paginated, filterable by status and/or action_type."
+          }
+        },
+        {
+          "name": "Get Bulk Action",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions/{{bulk_action_id}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions", "{{bulk_action_id}}"]
+            }
+          }
+        },
+        {
+          "name": "Get Bulk Action Stats",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions/{{bulk_action_id}}/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions", "{{bulk_action_id}}", "stats"]
+            },
+            "description": "total / processed / succeeded / failed / skipped counts."
+          }
+        },
+        {
+          "name": "Get Bulk Action Progress",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions/{{bulk_action_id}}/progress",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions", "{{bulk_action_id}}", "progress"]
+            },
+            "description": "status + percent_complete."
+          }
+        },
+        {
+          "name": "Cancel Bulk Action",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions/{{bulk_action_id}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions", "{{bulk_action_id}}", "cancel"]
+            },
+            "description": "409 if the action is already in a terminal state (COMPLETED/FAILED/CANCELLED)."
+          }
+        },
+        {
+          "name": "Get Bulk Action Logs",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions/{{bulk_action_id}}/logs?after_id=0&limit=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions", "{{bulk_action_id}}", "logs"],
+              "query": [
+                { "key": "after_id", "value": "0", "description": "cursor - pass the previous page's next_after_id to continue" },
+                { "key": "limit", "value": "100" },
+                { "key": "status", "value": "FAILED", "disabled": true, "description": "SUCCESS | FAILED | SKIPPED" }
+              ]
+            },
+            "description": "Cursor-paginated per-entity outcome log. Response includes next_after_id for the next page."
+          }
+        },
+        {
+          "name": "Get Bulk Action Logs - Filtered by SKIPPED",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions/{{bulk_action_id}}/logs?status=SKIPPED",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions", "{{bulk_action_id}}", "logs"],
+              "query": [
+                { "key": "status", "value": "SKIPPED" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Bulk Action - Not Found (404 example)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions/999999999",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions", "999999999"]
+            },
+            "description": "Expected: 404 Not Found"
+          }
+        }
+      ]
+    }
+  ]
+}
