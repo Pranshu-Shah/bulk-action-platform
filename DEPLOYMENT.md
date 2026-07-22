@@ -23,15 +23,23 @@ application code is platform-specific.
 Point the platform at this GitHub repo and configure:
 
 - **Build command**: `pip install -r requirements.txt`
-- **Pre-deploy / release command** (runs once per deploy, before the
-  new version starts serving traffic): `alembic upgrade head`
-- **Start command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+- **Start command**:
+  `alembic upgrade head && python -m app.commands.seed_contacts && uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 - **Health check path**: `/health`
 
-Running the migration as a pre-deploy/release step (rather than inside
-the start command) matters once there's more than one process type —
-otherwise both the web service and the worker service would try to run
-`alembic upgrade head` on every deploy, racing each other.
+A dedicated pre-deploy/release-phase step (a paid feature on some
+platforms' free tiers) isn't required — `alembic upgrade head` and the
+seed script are both idempotent, so chaining them into the start
+command is safe to run on every boot: migrations are a no-op once the
+DB is at head, and `seed_contacts` skips entirely once the `contacts`
+table has any rows (see `app/commands/seed_contacts.py`). Only the
+**web service** runs this chain — the worker service (below) starts
+Celery directly, so two processes never race to run migrations/seed
+against a fresh database at the same time.
+
+If the platform *does* offer a pre-deploy/release-phase command, moving
+just `alembic upgrade head` there instead is slightly cleaner (keeps the
+start command minimal) — either approach is correct.
 
 ## 3. Worker service (Celery)
 
@@ -76,14 +84,17 @@ values.
 
 1. Push to GitHub (`main` branch).
 2. Create the Postgres and Redis add-ons; note their connection strings.
-3. Create the web service pointing at the repo; set env vars; set the
-   pre-deploy command to `alembic upgrade head`.
+3. Create the web service pointing at the repo; set env vars; start
+   command includes the migrate-then-seed-then-serve chain from step 2
+   above.
 4. Create the worker service pointing at the same repo; same env vars;
-   start command from step 3 above.
-5. Deploy. Confirm `GET /health` returns `{"status": "healthy"}`.
-6. Optionally run `python -m app.commands.seed_contacts` once (as a
-   one-off job/shell on the platform) to have sample data to exercise
-   the API against.
+   start command is just the `celery` command from step 3 above (no
+   migrate/seed chain).
+5. Deploy. Confirm `GET /health` returns `{"status": "healthy"}`, and
+   that contacts exist (e.g. via `GET /docs` and creating a bulk action
+   against a small ID range) — the web service's first boot log should
+   show `Inserted 5000 contacts` (or `already has N rows, skipping seed`
+   on every boot after that).
 
 ## Scaling in production
 
