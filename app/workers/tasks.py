@@ -6,7 +6,8 @@ import structlog
 from app.actions.registry import ActionRegistry
 from app.core.config import settings
 from app.core.database import SessionLocal
-from app.core.utils import chunk_list
+from app.core.rate_limiter import RateLimiter
+from app.core.utils import chunk_list, register_or_flag_duplicate
 from app.entities.registry import EntityRegistry
 from app.enums.bulk_item_status import BulkActionItemStatus
 from app.enums.bulk_status import BulkActionStatus
@@ -79,23 +80,33 @@ def dispatch_bulk_action(self, bulk_action_id: int, entity_ids: list[int]):
         # ~1M-ID list) and anything not found is logged SKIPPED here,
         # directly, with no item row at all - it will never reach a batch
         # worker to be marked SKIPPED the normal way.
+        #
+        # De-duplication rides along in the same pass: entity types that
+        # define a dedup key (e.g. Contact -> email) have every entity
+        # after the first occurrence of a given key treated the same way
+        # as a missing ID - logged SKIPPED, no item row - rather than
+        # reprocessing the same underlying record twice in one job.
         found_ids = set()
+        seen_dedup_keys = set()
+        duplicate_ids = []
 
         for chunk in chunk_list(entity_ids, settings.BATCH_SIZE):
-            found_ids.update(
-                entity.id
-                for entity in entity_repo.get_by_ids(chunk)
-            )
+            for entity in entity_repo.get_by_ids(chunk):
+                if register_or_flag_duplicate(entity, seen_dedup_keys, entity_repo.get_dedup_key):
+                    duplicate_ids.append(entity.id)
+                else:
+                    found_ids.add(entity.id)
 
+        duplicate_id_set = set(duplicate_ids)
         missing_ids = [
             entity_id for entity_id in entity_ids
-            if entity_id not in found_ids
+            if entity_id not in found_ids and entity_id not in duplicate_id_set
         ]
 
         item_repo.bulk_create(bulk_action_id, list(found_ids))
         stats_repo.create(bulk_action_id, total=len(entity_ids))
 
-        if missing_ids:
+        if missing_ids or duplicate_ids:
 
             for missing_id in missing_ids:
                 log_repo.create(
@@ -105,8 +116,19 @@ def dispatch_bulk_action(self, bulk_action_id: int, entity_ids: list[int]):
                     "Entity not found",
                 )
 
+            for duplicate_id in duplicate_ids:
+                log_repo.create(
+                    bulk_action_id,
+                    duplicate_id,
+                    LogStatus.SKIPPED,
+                    "Duplicate entity (already targeted by this bulk action)",
+                )
+
             db.commit()
-            stats_repo.increment(bulk_action_id, skipped=len(missing_ids))
+            stats_repo.increment(
+                bulk_action_id,
+                skipped=len(missing_ids) + len(duplicate_ids),
+            )
 
         batch_count = 0
 
@@ -128,6 +150,7 @@ def dispatch_bulk_action(self, bulk_action_id: int, entity_ids: list[int]):
             "dispatch_completed",
             item_count=len(found_ids),
             missing_count=len(missing_ids),
+            duplicate_count=len(duplicate_ids),
             batch_count=batch_count,
             duration_ms=round((time.perf_counter() - start) * 1000, 2),
         )
@@ -183,6 +206,7 @@ def process_bulk_action_batch(self, bulk_action_id: int, batch_item_ids: list[in
         bulk_repo = BulkActionRepository(db)
         item_repo = BulkActionItemRepository(db)
         stats_repo = BulkActionStatsRepository(db)
+        log_repo = BulkLogRepository(db)
 
         bulk_action = bulk_repo.get(bulk_action_id)
 
@@ -205,6 +229,64 @@ def process_bulk_action_batch(self, bulk_action_id: int, batch_item_ids: list[in
         if not pending:
             logger.info("batch_skipped", reason="already_processed")
             return
+
+        # Rate limiting: only enforced when this bulk action has an
+        # account_id at all. Checked before marking items RUNNING -
+        # otherwise a rate-limited batch would leave its items stuck in
+        # RUNNING while waiting for the next window. max_retries=None on
+        # the retry below means a sustained rate limit keeps retrying
+        # indefinitely, rather than being subject to the task's normal
+        # retry_kwargs={"max_retries": 3} (which still applies to genuine
+        # processing errors via autoretry_for).
+        if bulk_action.account_id is not None:
+            limiter = RateLimiter()
+
+            if len(pending) > limiter.limit_per_minute:
+                # This batch can never fit within the configured limit,
+                # no matter how many times or when it retries - failing
+                # it clearly now instead of retrying forever, which would
+                # otherwise leave the bulk action silently stuck with no
+                # error ever surfaced. Configure BATCH_SIZE <=
+                # RATE_LIMIT_PER_MINUTE per rate-limited account to avoid
+                # this entirely.
+                error_message = (
+                    f"Batch size ({len(pending)}) exceeds the configured "
+                    f"rate limit ({limiter.limit_per_minute}/min) and can "
+                    f"never be processed as one unit."
+                )
+
+                logger.error(
+                    "batch_permanently_exceeds_rate_limit",
+                    account_id=bulk_action.account_id,
+                    pending_count=len(pending),
+                    limit_per_minute=limiter.limit_per_minute,
+                )
+
+                for item in pending:
+                    item_repo.mark_item_result(
+                        item.id, BulkActionItemStatus.FAILED, error_message,
+                    )
+                    log_repo.create(
+                        bulk_action_id, item.contact_id, LogStatus.FAILED, error_message,
+                    )
+
+                db.commit()
+                stats_repo.increment(bulk_action_id, failed=len(pending))
+
+                if stats_repo.is_complete(bulk_action_id) and bulk_action.status != BulkActionStatus.CANCELLED:
+                    bulk_action.status = BulkActionStatus.COMPLETED
+                    bulk_action.completed_at = datetime.now(UTC)
+                    bulk_repo.commit()
+
+                return
+
+            if not limiter.try_consume(bulk_action.account_id, len(pending)):
+                logger.info(
+                    "batch_rate_limited",
+                    account_id=bulk_action.account_id,
+                    pending_count=len(pending),
+                )
+                raise self.retry(countdown=60, max_retries=None)
 
         logger.info("batch_started", pending_count=len(pending))
 

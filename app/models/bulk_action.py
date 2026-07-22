@@ -42,6 +42,22 @@ class BulkAction(Base, TimestampMixin):
         nullable=True,
     )
 
+    # Optional, opt-in: only rate-limited when present. No FK - no
+    # accounts/users table exists in this single-tenant app.
+    account_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        index=True,
+    )
+
+    # Optional, opt-in: when set to a future time, create_bulk_action
+    # dispatches via Celery's apply_async(eta=...) instead of .delay(),
+    # and status starts as SCHEDULED instead of QUEUED.
+    scheduled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,

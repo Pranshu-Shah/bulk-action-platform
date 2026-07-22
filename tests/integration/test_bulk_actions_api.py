@@ -19,6 +19,7 @@ class TestCreateAndProcessBulkAction:
                 "entity_type": "contact",
                 "entity_ids": [c.id for c in contacts],
                 "payload": {"status": "INACTIVE", "age": 55},
+                "account_id": 1,
             },
         )
         assert response.status_code == 200
@@ -56,6 +57,7 @@ class TestCreateAndProcessBulkAction:
                 "entity_type": "contact",
                 "entity_ids": [contacts[0].id, MISSING_CONTACT_ID],
                 "payload": {"status": "INACTIVE"},
+                "account_id": 1,
             },
         )
         bulk_action_id = response.json()["id"]
@@ -77,6 +79,7 @@ class TestCreateAndProcessBulkAction:
                 "entity_type": "contact",
                 "entity_ids": [MISSING_CONTACT_ID],
                 "payload": {"status": "INACTIVE"},
+                "account_id": 1,
             },
         )
         bulk_action_id = response.json()["id"]
@@ -99,6 +102,7 @@ class TestValidationErrors:
                 "entity_type": "contact",
                 "entity_ids": [contacts[0].id],
                 "payload": {},
+                "account_id": 1,
             },
         )
         assert response.status_code == 400
@@ -111,6 +115,7 @@ class TestValidationErrors:
                 "entity_type": "contact",
                 "entity_ids": [contacts[0].id],
                 "payload": {},
+                "account_id": 1,
             },
         )
         assert response.status_code == 400
@@ -123,6 +128,7 @@ class TestValidationErrors:
                 "entity_type": "contact",
                 "entity_ids": [],
                 "payload": {"status": "INACTIVE"},
+                "account_id": 1,
             },
         )
         assert response.status_code == 422
@@ -147,6 +153,7 @@ class TestListBulkActions:
                     "entity_type": "contact",
                     "entity_ids": [contacts[0].id],
                     "payload": {},
+                    "account_id": 1,
                 },
             )
             ids.append(response.json()["id"])
@@ -166,6 +173,7 @@ class TestListBulkActions:
                 "entity_type": "contact",
                 "entity_ids": [contacts[0].id],
                 "payload": {},
+                "account_id": 1,
             },
         )
 
@@ -184,6 +192,7 @@ class TestCancelBulkAction:
                 "entity_type": "contact",
                 "entity_ids": [contacts[0].id],
                 "payload": {},
+                "account_id": 1,
             },
         )
         bulk_action_id = create_response.json()["id"]
@@ -207,6 +216,7 @@ class TestLogsPagination:
                 "entity_type": "contact",
                 "entity_ids": [c.id for c in contacts],
                 "payload": {},
+                "account_id": 1,
             },
         )
         bulk_action_id = create_response.json()["id"]
@@ -241,6 +251,7 @@ class TestLogsPagination:
                 "entity_type": "contact",
                 "entity_ids": [contacts[0].id, MISSING_CONTACT_ID],
                 "payload": {"status": "INACTIVE"},
+                "account_id": 1,
             },
         )
         bulk_action_id = create_response.json()["id"]

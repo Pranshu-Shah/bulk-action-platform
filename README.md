@@ -169,7 +169,7 @@ decisions in exactly one place.
 | Method | Path                              | Purpose                                      |
 |--------|------------------------------------|-----------------------------------------------|
 | POST   | `/bulk-actions`                    | Create and dispatch a bulk action              |
-| GET    | `/bulk-actions`                    | Paginated list, filterable by status/action_type, sortable |
+| GET    | `/bulk-actions`                    | Paginated list, filterable by status/action_type/account_id, sortable |
 | GET    | `/bulk-actions/{id}`               | Bulk action detail (status, timestamps)        |
 | GET    | `/bulk-actions/{id}/stats`         | Success/failure/skipped counts                 |
 | GET    | `/bulk-actions/{id}/progress`      | Status + percent complete                      |
@@ -195,10 +195,11 @@ REDIS_URL=redis://localhost:6379/0
 BATCH_SIZE=500
 LOG_LEVEL=INFO
 JSON_LOGS=false
+RATE_LIMIT_PER_MINUTE=10000
 ```
 
-Put those in `.env` (`LOG_LEVEL`/`JSON_LOGS` are optional and default to
-`INFO`/`false`).
+Put those in `.env` (everything after `BATCH_SIZE` is optional and
+defaults to the value shown).
 
 ```
 pip install -r requirements.txt
@@ -222,9 +223,10 @@ needs `os.fork()`.)
 pytest
 ```
 
-43 tests: unit tests for the service's validation/cancellation logic and
-each action handler, plus integration tests exercising the full HTTP API
-end to end. Tests run against the same Postgres used for local
+59 tests: unit tests for the service's validation/cancellation/scheduling
+logic, each action handler, de-duplication, and rate limiting, plus
+integration tests exercising the full HTTP API end to end. Tests run
+against the same Postgres used for local
 development — each test is wrapped in a real transaction
 (SQLAlchemy 2.0's `join_transaction_mode="create_savepoint"`) that's
 rolled back afterward, so nothing persists even though the application
@@ -282,136 +284,122 @@ adding more worker processes or machines against the same queue.
 - `idempotency_key` exists on `bulk_actions` (nullable, unique when
   present) but isn't yet enforced at creation time — duplicate
   submissions (double-click, network retry) aren't deduplicated.
-- Single-tenant: no `account_id` on any table. This is an explicit scope
-  boundary, noted here as the extension point multi-tenancy or
-  per-account rate limiting would build on.
-- No authentication or authorization on any endpoint.
+- Still effectively single-tenant in practice: `account_id` exists on
+  `bulk_actions` and powers rate limiting (see "Optional enhancements"),
+  but it's just an unauthenticated integer supplied in the request body
+  — no accounts/users table, no verification that the caller actually
+  owns that account. Rate limiting works, but isn't a real security
+  boundary until an auth layer exists to back it.
+- No authentication or authorization on any endpoint — the `account_id`
+  caveat above is a direct consequence of this.
 
-## Optional enhancements — implementation plan
+## Optional enhancements
 
-Three enhancements beyond the core spec were scoped in code-level detail
-below, not yet implemented.
+All three enhancements beyond the core spec are implemented. Scheduling
+is opt-in via a request field that defaults to "off"; de-duplication
+runs automatically whenever an entity type defines a dedup key, no field
+needed. Rate limiting is the one **mandatory** field (see below) - every
+request must declare an `account_id`. 16 additional tests cover them
+(`tests/unit/test_rate_limiter.py`, `tests/unit/test_deduplication.py`,
+`TestScheduling` in `tests/unit/test_bulk_action_service.py`).
 
 ### Rate limiting (per-account, N events/minute)
 
-**Schema**: add `account_id: Mapped[int]` (indexed, not nullable) to
-`BulkAction` via a new Alembic migration. `BulkActionCreate` gains a
-required `account_id: int` — no auth layer exists yet, so it's accepted
-directly in the request body, per the spec's "add an accountId for each
-bulk action."
+`BulkActionCreate.account_id: int` is **required** on every request -
+not optional. An earlier version made it opt-in, but that defeats the
+spec's own intent ("no account should be able to exceed a rate limit"):
+if omitting the field just skips rate limiting entirely, the limit isn't
+actually enforced on anyone who doesn't choose to participate.
+Requiring it at the HTTP boundary closes that gap - every external
+caller must declare an account. (`BulkActionService.create_bulk_action`
+keeps `account_id` optional at the Python level, so internal/service-
+level callers aren't forced through the same gate - only the untrusted
+public API enforces it.)
 
-**New component** — `app/core/rate_limiter.py`, a Redis-backed
-fixed-window counter:
-
-```python
-import time
-import redis
-from app.core.config import settings
-
-redis_client = redis.from_url(settings.REDIS_URL)
-
-class RateLimiter:
-    def __init__(self, limit_per_minute: int = 10_000):
-        self.limit_per_minute = limit_per_minute
-
-    def try_consume(self, account_id: int, count: int) -> bool:
-        bucket = f"rate:{account_id}:{int(time.time() // 60)}"
-        pipe = redis_client.pipeline()
-        pipe.incrby(bucket, count)
-        pipe.expire(bucket, 90)
-        new_total, _ = pipe.execute()
-        if new_total > self.limit_per_minute:
-            redis_client.decrby(bucket, count)  # roll back the reservation
-            return False
-        return True
-```
-
-**Wiring** — in `process_bulk_action_batch`, the check must run
-*before* `item_repo.bulk_mark_status(..., RUNNING)`, not after,
-otherwise a rate-limited batch leaves its items stuck in `RUNNING` while
-waiting for the next window:
+`process_bulk_action_batch` checks a Redis-backed fixed-window counter
+(`app/core/rate_limiter.py`, `RateLimiter.try_consume`) before
+processing each batch, reserving `len(pending)` units of that account's
+current-minute budget (`RATE_LIMIT_PER_MINUTE`, default 10,000). The
+check happens *before* `item_repo.bulk_mark_status(..., RUNNING)` -
+otherwise a rate-limited batch would leave its items stuck in `RUNNING`
+while waiting for the next window. If the reservation would exceed
+budget, it's rolled back (so a denied request doesn't still eat into
+the budget) and the batch backs off:
 
 ```python
-if not RateLimiter().try_consume(bulk_action.account_id, len(pending)):
-    logger.info("batch_rate_limited", account_id=bulk_action.account_id)
-    raise process_bulk_action_batch.retry(countdown=60)
+if bulk_action.account_id is not None:
+    if len(pending) > limiter.limit_per_minute:
+        # can never fit, no matter how many times it retries - fail fast
+        ...mark all pending items FAILED, update stats, return...
+    if not limiter.try_consume(bulk_action.account_id, len(pending)):
+        raise self.retry(countdown=60, max_retries=None)
 ```
 
-The task already declares `autoretry_for=(Exception,)`, so this reuses
-the existing retry machinery rather than adding a second one. The
-increment-then-rollback-on-overflow pattern avoids a race where two
-concurrent batches both read a stale count and both believe they have
-budget.
+Two things worth calling out, both found by testing this against its
+own edge cases rather than just the happy path:
+
+1. **A batch permanently larger than the limit must fail fast, not
+   retry forever.** The first version only had the `try_consume` check -
+   if a single batch's size (`BATCH_SIZE`) itself exceeds
+   `RATE_LIMIT_PER_MINUTE`, *every* retry attempt reserves the same
+   too-large amount against a freshly-reset budget and gets denied again,
+   forever, with no error ever surfaced - a bulk action silently stuck
+   for good. The size check above catches this specific case and fails
+   those items immediately with a clear message instead. Configure
+   `BATCH_SIZE <= RATE_LIMIT_PER_MINUTE` for any account that will
+   actually be rate-limited, to stay in the "temporarily over budget,
+   retries and succeeds later" case rather than this one.
+2. `max_retries=None` on the genuine retry call matters: the task's own
+   `retry_kwargs={"max_retries": 3}` is what governs actual processing
+   errors (via `autoretry_for`), but a sustained-but-eventually-clearing
+   rate limit should keep backing off indefinitely rather than giving up
+   and marking the batch `FAILED` after 3 minutes.
+
+**Honest caveat**: there's still no authentication layer, so
+`account_id`, while now mandatory, is entirely client-supplied and
+unverified - a caller can still supply any account_id it wants,
+including someone else's. Making it required stops the "just omit it"
+bypass, but this isn't a real security boundary until an auth layer
+exists and `account_id` is derived from a verified identity instead of
+accepted at face value.
 
 ### De-duplication by email
 
-This slots into the existing missing-ID handling in
-`dispatch_bulk_action`, which already separates "target exists" from
-"target doesn't exist" before creating item rows — the exact shape
-needed here.
+`BaseEntityRepository` gained one more method, with a default that
+opts an entity type out entirely: `get_dedup_key(entity) -> object |
+None`. `ContactRepository` returns `entity.email`. In
+`dispatch_bulk_action`, the same pass that checks which `entity_ids`
+actually exist also tracks dedup keys seen so far
+(`app/core/utils.register_or_flag_duplicate`); the first entity for a
+given key proceeds normally, any later one in the same request is
+logged `SKIPPED` ("Duplicate entity...") with no item row created - the
+same treatment a missing ID already gets, just a different reason.
 
-**Interface addition** — `BaseEntityRepository` gains one more optional
-method:
-
-```python
-def get_dedup_key(self, entity) -> object | None:
-    """Return the value duplicates are detected by, or None if this entity type has none."""
-    return None
-```
-
-`ContactRepository` overrides it: `return entity.email`.
-
-**Dispatch logic**, replacing the current `found_ids`-only loop:
-
-```python
-seen_keys = set()
-duplicate_ids = []
-
-for chunk in chunk_list(entity_ids, settings.BATCH_SIZE):
-    for entity in entity_repo.get_by_ids(chunk):
-        dedup_key = entity_repo.get_dedup_key(entity)
-        if dedup_key is not None and dedup_key in seen_keys:
-            duplicate_ids.append(entity.id)
-            continue
-        if dedup_key is not None:
-            seen_keys.add(dedup_key)
-        found_ids.add(entity.id)
-```
-
-`duplicate_ids` then flows through the same log-and-skip path
-`missing_ids` already uses, just with the message `"Duplicate email"`
-instead of `"Entity not found"` — no new item row, no batch ever sees
-it. Entity types with no natural dedup key (`get_dedup_key` returning
-`None`) skip this check entirely.
+**Testing note worth knowing**: `contacts.email` has a real database
+unique constraint, so two genuine contacts can never actually share an
+email - there's no way to construct that scenario with real rows. The
+core algorithm is unit-tested directly against plain fake objects
+(sidestepping the constraint entirely), and the full
+`dispatch_bulk_action` wiring is proven with a test repository that
+forcibly reports a duplicate key for two real contacts regardless of
+their actual (distinct) emails - confirming the end-to-end log/skip/stats
+behavior without fighting the database's own guarantee.
 
 ### Scheduling
 
-**Schema**: add `scheduled_at: Mapped[datetime | None]` (nullable,
-timezone-aware) to `BulkAction`. `BulkActionCreate` gains optional
-`scheduled_at: datetime | None = None`.
-
-**Service change** — in `create_bulk_action`:
-
-```python
-if scheduled_at and scheduled_at > datetime.now(UTC):
-    bulk_action.status = BulkActionStatus.SCHEDULED
-    bulk_action = self.repository.create(bulk_action)
-    dispatch_bulk_action.apply_async(args=[bulk_action.id, entity_ids], eta=scheduled_at)
-else:
-    bulk_action.status = BulkActionStatus.QUEUED
-    bulk_action = self.repository.create(bulk_action)
-    dispatch_bulk_action.delay(bulk_action.id, entity_ids)
-```
-
-This is the cheapest of the three by a wide margin, because two things
-already exist and need zero changes: `BulkActionStatus.SCHEDULED` is
-already a valid enum value with `CANCELLABLE_STATUSES` already including
-it, and `dispatch_bulk_action` already checks
-`if bulk_action.status == CANCELLED: return` as its very first line —
-so cancelling a scheduled-but-not-yet-started action is already correct
-behavior the moment the `eta` fires, with no new code.
+`BulkActionCreate.scheduled_at: datetime | None = None`. In
+`create_bulk_action`, a future timestamp starts the action as
+`SCHEDULED` instead of `QUEUED` and dispatches via Celery's
+`apply_async(eta=scheduled_at)` instead of `.delay()`; a past or omitted
+timestamp behaves exactly as before. This was the cheapest of the three
+to build: `BulkActionStatus.SCHEDULED` and its place in
+`CANCELLABLE_STATUSES` already existed, and `dispatch_bulk_action`
+already checks `if bulk_action.status == CANCELLED: return` as its very
+first line - so cancelling a scheduled-but-not-yet-started action
+already worked correctly the moment `eta` fires, no new code needed
+there.
 
 **Testing note**: `task_always_eager=True` (used in the test suite)
-makes Celery ignore `eta` and run immediately — a scheduling test would
-assert on the `apply_async` call arguments (that `eta` was passed
-correctly) rather than on real delayed execution.
+makes Celery ignore `eta` and run immediately, so the test asserts on
+the `apply_async` call arguments directly (via a monkeypatched stub)
+rather than on real delayed execution.

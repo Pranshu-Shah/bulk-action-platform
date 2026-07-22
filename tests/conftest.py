@@ -70,6 +70,19 @@ def celery_eager():
 def client(db_session):
 
     def override_get_db():
+        # In production, every HTTP request gets a genuinely fresh
+        # Session with an empty identity map, so it always sees current
+        # data. Here, `db_session` is deliberately reused across every
+        # simulated request in a test (that's what makes the whole-test
+        # rollback work) - but without this, an object loaded during an
+        # earlier request (e.g. the POST that creates a BulkAction) stays
+        # cached and stale for a later request (e.g. the GET that checks
+        # its status), even after a *different* session - such as a
+        # Celery task's own SessionLocal() - has since committed real
+        # changes to that same row. expire_all() forces the next query to
+        # reload current data instead of returning the stale cached
+        # object, without ending the transaction the rollback relies on.
+        db_session.expire_all()
         yield db_session
 
     app.dependency_overrides[get_db] = override_get_db
