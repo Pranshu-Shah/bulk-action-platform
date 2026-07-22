@@ -1,0 +1,109 @@
+# Deployment
+
+This service has three moving parts that need to run independently:
+a **web process** (FastAPI/uvicorn), a **worker process** (Celery), and
+two **managed data stores** (Postgres, Redis). No Docker is required —
+the instructions below target a PaaS with native Python support and
+managed database add-ons (Render is used as the concrete example;
+Railway, Fly.io, and similar platforms follow the same shape almost
+exactly).
+
+## 1. Provision the data stores
+
+- **Postgres**: create a managed Postgres instance on the platform.
+  Copy its connection string — this becomes `DATABASE_URL`.
+- **Redis**: create a managed Redis instance the same way — this
+  becomes `REDIS_URL`.
+
+Both are used exactly as they would be locally; nothing in the
+application code is platform-specific.
+
+## 2. Web service (API)
+
+Point the platform at this GitHub repo and configure:
+
+- **Build command**: `pip install -r requirements.txt`
+- **Pre-deploy / release command** (runs once per deploy, before the
+  new version starts serving traffic): `alembic upgrade head`
+- **Start command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+- **Health check path**: `/health`
+
+Running the migration as a pre-deploy/release step (rather than inside
+the start command) matters once there's more than one process type —
+otherwise both the web service and the worker service would try to run
+`alembic upgrade head` on every deploy, racing each other.
+
+## 3. Worker service (Celery)
+
+A second service, same repo, same environment variables, different
+start command:
+
+```
+celery -A app.workers.celery_app.celery worker --loglevel=info --concurrency=4
+```
+
+**Note on `--pool`**: locally this project runs `--pool=threads`
+because Celery's default `prefork` pool needs `os.fork()`, which
+doesn't exist on Windows. Linux-based PaaS platforms don't have that
+restriction — `prefork` (the default, just omit `--pool` entirely) gives
+real OS-process parallelism instead of thread-based concurrency, and is
+generally the better choice for a production Linux deployment. Use
+`--pool=threads` only if there's a specific reason to prefer it (e.g.
+memory constraints — prefork's separate processes use more memory than
+threads sharing one process).
+
+## 4. Environment variables (both services)
+
+```
+DATABASE_URL=<from the managed Postgres instance>
+REDIS_URL=<from the managed Redis instance>
+BATCH_SIZE=500
+LOG_LEVEL=INFO
+JSON_LOGS=true
+```
+
+`JSON_LOGS=true` in production — structlog then emits JSON lines instead
+of the human-readable console format, which is what most log
+aggregation tools (the platform's own log viewer, or anything it forwards
+to) expect.
+
+Never commit real values for these — `.env` is gitignored specifically
+so secrets live only in the platform's environment/secret manager, not
+in source control. `.env.example` documents the shape without real
+values.
+
+## 5. First deploy checklist
+
+1. Push to GitHub (`main` branch).
+2. Create the Postgres and Redis add-ons; note their connection strings.
+3. Create the web service pointing at the repo; set env vars; set the
+   pre-deploy command to `alembic upgrade head`.
+4. Create the worker service pointing at the same repo; same env vars;
+   start command from step 3 above.
+5. Deploy. Confirm `GET /health` returns `{"status": "healthy"}`.
+6. Optionally run `python -m app.commands.seed_contacts` once (as a
+   one-off job/shell on the platform) to have sample data to exercise
+   the API against.
+
+## Scaling in production
+
+- **More worker capacity**: increase the worker service's instance
+  count (or `--concurrency`) — batches are already designed to run in
+  parallel across however many workers are consuming the queue; this
+  requires no code or schema changes.
+- **More web capacity**: increase the web service's instance count.
+  The API layer does no heavy lifting itself (it only validates and
+  enqueues), so it scales independently of worker capacity.
+- **Database connection limits**: each worker concurrency slot opens
+  its own DB session. If worker concurrency is increased substantially,
+  check the managed Postgres plan's max-connections limit against
+  `(number of worker instances) × (concurrency per instance)`, and raise
+  SQLAlchemy's pool size (`create_engine(..., pool_size=..., max_overflow=...)`
+  in `app/core/database.py`) if needed.
+
+## Before exposing this publicly
+
+None of the following exist yet (see README "Known limitations") and
+are worth addressing before real external traffic hits this service:
+authentication/authorization on every endpoint, and per-account rate
+limiting (see README "Optional enhancements" for the design).

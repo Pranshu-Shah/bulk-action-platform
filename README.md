@@ -184,6 +184,9 @@ list/logs filter/pagination parameter pre-filled.
 
 ## Setup
 
+For running this locally. For deploying it to a real environment, see
+[DEPLOYMENT.md](DEPLOYMENT.md).
+
 Requires a local PostgreSQL and Redis instance.
 
 ```
