@@ -16,9 +16,16 @@ class BulkActionCreate(BaseModel):
 
     payload: dict[str, Any]
 
-    # Both optional/opt-in: omitting them preserves exactly today's
-    # behavior (no rate limiting, dispatched immediately).
-    account_id: int | None = None
+    # Required at this boundary specifically: rate limiting is only
+    # meaningful if every external caller is forced to declare an
+    # account, otherwise it's trivially bypassed by omitting the field.
+    # (BulkActionService.create_bulk_action keeps this optional at the
+    # Python level - internal/service-level callers aren't forced
+    # through the same gate.)
+    account_id: int
+
+    # Optional/opt-in: omitting it preserves exactly today's behavior
+    # (dispatched immediately, no scheduling).
     scheduled_at: datetime | None = None
 
 

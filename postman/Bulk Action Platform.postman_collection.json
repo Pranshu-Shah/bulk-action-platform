@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Bulk Action Platform",
-    "description": "API for running bulk operations (update, delete, archive, assign-owner, export) against Contacts at scale. Set the `baseUrl` variable, run a Create request, copy the returned `id` into the `bulk_action_id` variable, then use the status/stats/progress/logs/cancel requests.\n\nEvery Create request also accepts two optional fields not shown in every example below: `account_id` (int) enables per-account rate limiting, and `scheduled_at` (ISO 8601 datetime) defers dispatch to a future time via Celery's eta mechanism. Duplicate targets sharing the same email within one request are automatically detected and skipped - no special field needed for that.",
+    "description": "API for running bulk operations (update, delete, archive, assign-owner, export) against Contacts at scale. Set the `baseUrl` variable, run a Create request, copy the returned `id` into the `bulk_action_id` variable, then use the status/stats/progress/logs/cancel requests.\n\nEvery Create request requires `account_id` (int) - it's what per-account rate limiting is checked against (RATE_LIMIT_PER_MINUTE, default 10k/min). `scheduled_at` (ISO 8601 datetime) is optional and defers dispatch to a future time via Celery's eta mechanism. Duplicate targets sharing the same email within one request are automatically detected and skipped - no special field needed for that.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -36,7 +36,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"action_type\": \"bulk_update\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1, 2, 3],\n  \"payload\": {\n    \"status\": \"INACTIVE\",\n    \"age\": 30\n  }\n}"
+              "raw": "{\n  \"action_type\": \"bulk_update\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1, 2, 3],\n  \"payload\": {\n    \"status\": \"INACTIVE\",\n    \"age\": 30\n  },\n  \"account_id\": 1\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/bulk-actions",
@@ -53,7 +53,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"action_type\": \"bulk_delete\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [4, 5],\n  \"payload\": {}\n}"
+              "raw": "{\n  \"action_type\": \"bulk_delete\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [4, 5],\n  \"payload\": {},\n  \"account_id\": 1\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/bulk-actions",
@@ -70,7 +70,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"action_type\": \"bulk_archive\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [6, 7],\n  \"payload\": {}\n}"
+              "raw": "{\n  \"action_type\": \"bulk_archive\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [6, 7],\n  \"payload\": {},\n  \"account_id\": 1\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/bulk-actions",
@@ -87,7 +87,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"action_type\": \"bulk_assign_owner\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [8, 9],\n  \"payload\": {\n    \"owner_id\": 42\n  }\n}"
+              "raw": "{\n  \"action_type\": \"bulk_assign_owner\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [8, 9],\n  \"payload\": {\n    \"owner_id\": 42\n  },\n  \"account_id\": 1\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/bulk-actions",
@@ -104,7 +104,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"action_type\": \"bulk_export\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1, 2, 3],\n  \"payload\": {}\n}"
+              "raw": "{\n  \"action_type\": \"bulk_export\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1, 2, 3],\n  \"payload\": {},\n  \"account_id\": 1\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/bulk-actions",
@@ -115,20 +115,20 @@
           }
         },
         {
-          "name": "Create - Bulk Update (rate-limited by account)",
+          "name": "Create - Bulk Update (rate limit demo)",
           "request": {
             "method": "POST",
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"action_type\": \"bulk_update\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1, 2, 3],\n  \"payload\": {\n    \"status\": \"INACTIVE\"\n  },\n  \"account_id\": 42\n}"
+              "raw": "{\n  \"action_type\": \"bulk_update\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],\n  \"payload\": {\n    \"status\": \"INACTIVE\"\n  },\n  \"account_id\": 999\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/bulk-actions",
               "host": ["{{baseUrl}}"],
               "path": ["bulk-actions"]
             },
-            "description": "account_id is optional - when present, each batch checks a per-account, per-minute Redis budget (RATE_LIMIT_PER_MINUTE, default 10k) before processing; over-budget batches back off and retry on the next window rather than failing. Omit account_id entirely to skip rate limiting."
+            "description": "account_id is required on every request - it's what the per-account, per-minute Redis budget (RATE_LIMIT_PER_MINUTE, default 10k) is checked against. At the default limit, this request never comes close to being throttled.\n\nTo actually see rate limiting kick in: set BATCH_SIZE and RATE_LIMIT_PER_MINUTE to the same small number (e.g. both 5) in .env and restart uvicorn + the worker, then send this request (10 entity_ids -> 2 batches of 5). The first batch fits and succeeds immediately; the second competes for the same minute's already-spent budget, gets denied, and retries ~60s later once the window resets - watch the worker log for `batch_rate_limited` then eventual `batch_completed`.\n\nImportant: if BATCH_SIZE is left LARGER than RATE_LIMIT_PER_MINUTE, a single batch can never fit at all - the worker detects this (`batch_permanently_exceeds_rate_limit`) and fails those items immediately with a clear error instead of retrying forever."
           }
         },
         {
@@ -138,14 +138,14 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"action_type\": \"bulk_update\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1, 2, 3],\n  \"payload\": {\n    \"status\": \"INACTIVE\"\n  },\n  \"scheduled_at\": \"2026-12-31T23:00:00Z\"\n}"
+              "raw": "{\n  \"action_type\": \"bulk_update\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1, 2, 3],\n  \"payload\": {\n    \"status\": \"INACTIVE\"\n  },\n  \"account_id\": 1,\n  \"scheduled_at\": \"2026-12-31T23:00:00Z\"\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/bulk-actions",
               "host": ["{{baseUrl}}"],
               "path": ["bulk-actions"]
             },
-            "description": "scheduled_at is optional - a future ISO 8601 timestamp starts the action with status=SCHEDULED and dispatches via Celery's apply_async(eta=...) instead of running immediately. Cancelling it (POST .../cancel) before that time works exactly like cancelling any other non-terminal action. Omit scheduled_at (or use a past timestamp) to dispatch immediately as before."
+            "description": "scheduled_at is optional - a future ISO 8601 timestamp (note the trailing Z = UTC; use an explicit offset like +05:30 if you mean a different timezone) starts the action with status=SCHEDULED and dispatches via Celery's apply_async(eta=...) instead of running immediately. Cancelling it (POST .../cancel) before that time works exactly like cancelling any other non-terminal action. Omit scheduled_at (or use a past timestamp) to dispatch immediately as before."
           }
         },
         {
@@ -155,7 +155,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"action_type\": \"bulk_frobnicate\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1],\n  \"payload\": {}\n}"
+              "raw": "{\n  \"action_type\": \"bulk_frobnicate\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1],\n  \"payload\": {},\n  \"account_id\": 1\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/bulk-actions",
@@ -163,6 +163,23 @@
               "path": ["bulk-actions"]
             },
             "description": "Expected: 400 Bad Request - \"Unsupported action type: bulk_frobnicate\""
+          }
+        },
+        {
+          "name": "Create - Missing account_id (422 example)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"action_type\": \"bulk_update\",\n  \"entity_type\": \"contact\",\n  \"entity_ids\": [1],\n  \"payload\": {\n    \"status\": \"INACTIVE\"\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/bulk-actions",
+              "host": ["{{baseUrl}}"],
+              "path": ["bulk-actions"]
+            },
+            "description": "Expected: 422 Unprocessable Entity - account_id is required on every request, precisely so rate limiting can't be bypassed by simply omitting it."
           }
         }
       ]
@@ -184,7 +201,7 @@
                 { "key": "sort", "value": "desc", "description": "asc | desc, sorted by id" },
                 { "key": "status", "value": "COMPLETED", "disabled": true },
                 { "key": "action_type", "value": "bulk_update", "disabled": true },
-                { "key": "account_id", "value": "42", "disabled": true }
+                { "key": "account_id", "value": "1", "disabled": true }
               ]
             },
             "description": "Paginated, filterable by status, action_type, and/or account_id."

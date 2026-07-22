@@ -9,6 +9,7 @@ from app.enums.bulk_item_status import BulkActionItemStatus
 from app.enums.bulk_status import BulkActionStatus
 from app.models.bulk_action import BulkAction
 from app.models.bulk_action_item import BulkActionItem
+from app.repositories.bulk_action_stats_repository import BulkActionStatsRepository
 from app.workers import tasks as tasks_module
 
 
@@ -57,10 +58,18 @@ class TestBatchRateLimitingWiring:
     decoupled once actually queued through Redis).
     """
 
-    def test_batch_retries_when_account_over_budget(
+    def test_batch_retries_when_temporarily_over_budget(
         self, db_session, monkeypatch, contacts, test_account_id,
     ):
-        monkeypatch.setattr(settings, "RATE_LIMIT_PER_MINUTE", 1)
+        """
+        The batch's own size (3) fits within the limit (3) - the account
+        has simply already used up this minute's whole budget via an
+        earlier, unrelated reservation. This is the genuine "wait for the
+        next window" case - distinct from a batch that can never fit
+        regardless of timing, tested below.
+        """
+        monkeypatch.setattr(settings, "RATE_LIMIT_PER_MINUTE", 3)
+        RateLimiter().try_consume(test_account_id, 3)  # exhausts this minute's budget
 
         bulk_action = BulkAction(
             action_type="bulk_export",
@@ -97,6 +106,56 @@ class TestBatchRateLimitingWiring:
         for item in items:
             db_session.refresh(item)
             assert item.status == BulkActionItemStatus.QUEUED
+
+    def test_batch_fails_fast_when_permanently_over_limit(
+        self, db_session, monkeypatch, contacts, test_account_id,
+    ):
+        """
+        The batch's own size (3) exceeds the limit (1) - no amount of
+        retrying or waiting for the next window ever fits 3 into a
+        budget of 1. This must fail clearly and immediately rather than
+        retry forever with no error ever surfaced.
+        """
+        monkeypatch.setattr(settings, "RATE_LIMIT_PER_MINUTE", 1)
+
+        bulk_action = BulkAction(
+            action_type="bulk_export",
+            entity_type="contact",
+            status=BulkActionStatus.RUNNING,
+            payload={},
+            account_id=test_account_id,
+        )
+        db_session.add(bulk_action)
+        db_session.commit()
+        db_session.refresh(bulk_action)
+
+        items = [
+            BulkActionItem(
+                bulk_action_id=bulk_action.id,
+                contact_id=contact.id,
+                status=BulkActionItemStatus.QUEUED,
+            )
+            for contact in contacts[:3]
+        ]
+        db_session.add_all(items)
+        db_session.commit()
+        for item in items:
+            db_session.refresh(item)
+
+        BulkActionStatsRepository(db_session).create(bulk_action.id, total=len(items))
+
+        # Must NOT raise - fails fast and returns, rather than retrying.
+        tasks_module.process_bulk_action_batch(
+            bulk_action.id, [item.id for item in items],
+        )
+
+        for item in items:
+            db_session.refresh(item)
+            assert item.status == BulkActionItemStatus.FAILED
+            assert "exceeds the configured rate limit" in item.error_message
+
+        db_session.refresh(bulk_action)
+        assert bulk_action.status == BulkActionStatus.COMPLETED  # completed-with-failures
 
     def test_batch_proceeds_when_under_budget(
         self, db_session, monkeypatch, contacts, test_account_id,

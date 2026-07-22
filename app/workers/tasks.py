@@ -206,6 +206,7 @@ def process_bulk_action_batch(self, bulk_action_id: int, batch_item_ids: list[in
         bulk_repo = BulkActionRepository(db)
         item_repo = BulkActionItemRepository(db)
         stats_repo = BulkActionStatsRepository(db)
+        log_repo = BulkLogRepository(db)
 
         bulk_action = bulk_repo.get(bulk_action_id)
 
@@ -233,12 +234,53 @@ def process_bulk_action_batch(self, bulk_action_id: int, batch_item_ids: list[in
         # account_id at all. Checked before marking items RUNNING -
         # otherwise a rate-limited batch would leave its items stuck in
         # RUNNING while waiting for the next window. max_retries=None on
-        # this specific retry call means a sustained rate limit keeps
-        # retrying indefinitely, rather than being subject to the task's
-        # normal retry_kwargs={"max_retries": 3} (which is still what
-        # applies to genuine processing errors via autoretry_for).
+        # the retry below means a sustained rate limit keeps retrying
+        # indefinitely, rather than being subject to the task's normal
+        # retry_kwargs={"max_retries": 3} (which still applies to genuine
+        # processing errors via autoretry_for).
         if bulk_action.account_id is not None:
-            if not RateLimiter().try_consume(bulk_action.account_id, len(pending)):
+            limiter = RateLimiter()
+
+            if len(pending) > limiter.limit_per_minute:
+                # This batch can never fit within the configured limit,
+                # no matter how many times or when it retries - failing
+                # it clearly now instead of retrying forever, which would
+                # otherwise leave the bulk action silently stuck with no
+                # error ever surfaced. Configure BATCH_SIZE <=
+                # RATE_LIMIT_PER_MINUTE per rate-limited account to avoid
+                # this entirely.
+                error_message = (
+                    f"Batch size ({len(pending)}) exceeds the configured "
+                    f"rate limit ({limiter.limit_per_minute}/min) and can "
+                    f"never be processed as one unit."
+                )
+
+                logger.error(
+                    "batch_permanently_exceeds_rate_limit",
+                    account_id=bulk_action.account_id,
+                    pending_count=len(pending),
+                    limit_per_minute=limiter.limit_per_minute,
+                )
+
+                for item in pending:
+                    item_repo.mark_item_result(
+                        item.id, BulkActionItemStatus.FAILED, error_message,
+                    )
+                    log_repo.create(
+                        bulk_action_id, item.contact_id, LogStatus.FAILED, error_message,
+                    )
+
+                db.commit()
+                stats_repo.increment(bulk_action_id, failed=len(pending))
+
+                if stats_repo.is_complete(bulk_action_id) and bulk_action.status != BulkActionStatus.CANCELLED:
+                    bulk_action.status = BulkActionStatus.COMPLETED
+                    bulk_action.completed_at = datetime.now(UTC)
+                    bulk_repo.commit()
+
+                return
+
+            if not limiter.try_consume(bulk_action.account_id, len(pending)):
                 logger.info(
                     "batch_rate_limited",
                     account_id=bulk_action.account_id,

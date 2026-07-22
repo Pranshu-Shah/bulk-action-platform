@@ -547,12 +547,78 @@ scheduling (the three optional enhancements - discussed with effort
 estimates, none started), Loom video (human deliverable), full
 schema-level entity generalization (see above).
 
+## Optional enhancements branch (`feature/optional-enhancements`, 2026-07-22)
+
+Built on a dedicated branch, off `main`, per explicit user request - none
+of this has touched `main` or the deployed Render app. All three
+enhancements from README "Optional enhancements" (previously just a
+design sketch) are now actually implemented and tested (59 tests, up
+from 43). Two real bugs were found and fixed via the user's own sharp
+questions after the initial implementation, not by the user testing
+first this time - both are exactly the kind of thing worth recording:
+
+1. **Rate limiter infinite-retry bug** (user asked: "if we keep the
+   limit at 5 and send 10, won't it fail forever since 10>5 regardless
+   of which minute?"). Correct catch - the original implementation only
+   checked "does this reservation fit `try_consume`," with no upper
+   bound on batch size vs. the configured limit. If a single batch's
+   size permanently exceeds `RATE_LIMIT_PER_MINUTE`, every retry
+   attempt reserves the same too-large amount against a freshly-reset
+   budget and gets denied again, forever - a bulk action silently stuck
+   with no error ever surfaced. Fixed: `process_bulk_action_batch` now
+   checks `len(pending) > limiter.limit_per_minute` first and, if so,
+   fails those items immediately with a clear message instead of
+   retrying - see `app/workers/tasks.py`. New test:
+   `test_batch_fails_fast_when_permanently_over_limit`; the old
+   over-budget test was renamed/fixed to actually test the *temporary*
+   retry case (batch size fits, account's cumulative usage doesn't) -
+   `test_batch_retries_when_temporarily_over_budget`.
+2. **`account_id` optionality defeated its own purpose** (user asked:
+   "shouldn't account_id be compulsory if we want to actually apply rate
+   limiting?"). Also correct - if omitting the field just skips rate
+   limiting entirely, the spec's "no account should be able to exceed a
+   rate limit" isn't actually enforced on anyone who doesn't opt in.
+   Fixed: `BulkActionCreate.account_id` is now required (no default) -
+   enforced at the HTTP/Pydantic boundary specifically, since that's the
+   untrusted edge. `BulkActionService.create_bulk_action` deliberately
+   kept `account_id` optional at the Python level, so internal/
+   service-level callers (and all the service-level unit tests) aren't
+   forced through the same gate - only `tests/integration/
+   test_bulk_actions_api.py` (11 POST bodies) and the Postman
+   collection's Create examples needed `account_id` added.
+
+**A third, unrelated bug surfaced independently while chasing test
+failures from the `account_id`-required change** (not something either
+of the two questions above was about - found while debugging why
+`test_bulk_update_runs_end_to_end` started failing after adding
+`account_id` to its request body): `tests/conftest.py`'s `client`
+fixture reuses the same `db_session` object across every simulated HTTP
+request within one test (that's what makes the whole-test rollback
+design work) - but unlike production, where every request gets a
+genuinely fresh Session with an empty identity map, a `BulkAction`
+object loaded during an earlier simulated request (e.g. the `POST`)
+stayed cached and stale for a later one (e.g. the `GET` checking its
+status), even after a *different* Session - the Celery task's own
+`SessionLocal()` - had since committed real changes to that same row.
+Confirmed via raw SQL on the same connection that the actual committed
+data was always correct (`COMPLETED`) - this was purely a test-fixture
+artifact, never a production bug, and would never manifest outside
+tests since real requests never share a session. It was intermittent
+depending on test execution order (whichever test happened to be first
+to touch a cold Redis connection - a ~2s one-time client warm-up delay,
+unrelated to the actual bug - was the one that surfaced it, which is
+why it looked like a flake at first). Fixed with one line:
+`db_session.expire_all()` at the top of `override_get_db()`, forcing
+each simulated request to see current data without ending the
+transaction the rollback relies on.
+
 ## Next immediate action
-Everything above is done and verified (43 tests passing, real load test
-run). Nothing is currently blocking. Remaining candidates for further
-work, none started, none promised:
-- The three optional enhancements (rate limiting, de-duplication,
-  scheduling) - see README "Known limitations" for sketches/estimates.
+Everything above is done and verified (59 tests passing on the feature
+branch, real load test previously run on `main`). Nothing is currently
+blocking. Remaining candidates for further work, none started, none
+promised:
+- Merge `feature/optional-enhancements` into `main` (and redeploy),
+  whenever the user wants to - not done automatically.
 - Loom video - needs the user; a script/outline can be drafted on
   request.
 - Wire `idempotency_key` into `create_bulk_action` (column exists,
@@ -561,6 +627,8 @@ work, none started, none promised:
   re-targeted by a later bulk action, if that's ever desired.
 - Real file export + download endpoint for `bulk_export`, if/when
   storage requirements are decided (currently a log-only placeholder).
-- Auth/authz - there is currently none on any endpoint.
+- Auth/authz - there is currently none on any endpoint. `account_id` is
+  mandatory now but still entirely unverified/client-supplied - the
+  next real step for rate limiting to become a real security boundary.
 - Full schema-level entity generalization (generic `entity_id`, no
   single-table FK) - only worth doing once a second entity type is real.

@@ -223,7 +223,7 @@ needs `os.fork()`.)
 pytest
 ```
 
-58 tests: unit tests for the service's validation/cancellation/scheduling
+59 tests: unit tests for the service's validation/cancellation/scheduling
 logic, each action handler, de-duplication, and rate limiting, plus
 integration tests exercising the full HTTP API end to end. Tests run
 against the same Postgres used for local
@@ -295,15 +295,27 @@ adding more worker processes or machines against the same queue.
 
 ## Optional enhancements
 
-All three enhancements beyond the core spec are implemented, each
-opt-in via a request field that defaults to "off" — omitting it
-preserves exactly the original behavior. 15 additional tests cover them
+All three enhancements beyond the core spec are implemented. Scheduling
+is opt-in via a request field that defaults to "off"; de-duplication
+runs automatically whenever an entity type defines a dedup key, no field
+needed. Rate limiting is the one **mandatory** field (see below) - every
+request must declare an `account_id`. 16 additional tests cover them
 (`tests/unit/test_rate_limiter.py`, `tests/unit/test_deduplication.py`,
 `TestScheduling` in `tests/unit/test_bulk_action_service.py`).
 
 ### Rate limiting (per-account, N events/minute)
 
-`BulkActionCreate.account_id: int | None = None` — when supplied,
+`BulkActionCreate.account_id: int` is **required** on every request -
+not optional. An earlier version made it opt-in, but that defeats the
+spec's own intent ("no account should be able to exceed a rate limit"):
+if omitting the field just skips rate limiting entirely, the limit isn't
+actually enforced on anyone who doesn't choose to participate.
+Requiring it at the HTTP boundary closes that gap - every external
+caller must declare an account. (`BulkActionService.create_bulk_action`
+keeps `account_id` optional at the Python level, so internal/service-
+level callers aren't forced through the same gate - only the untrusted
+public API enforces it.)
+
 `process_bulk_action_batch` checks a Redis-backed fixed-window counter
 (`app/core/rate_limiter.py`, `RateLimiter.try_consume`) before
 processing each batch, reserving `len(pending)` units of that account's
@@ -316,22 +328,40 @@ the budget) and the batch backs off:
 
 ```python
 if bulk_action.account_id is not None:
-    if not RateLimiter().try_consume(bulk_action.account_id, len(pending)):
+    if len(pending) > limiter.limit_per_minute:
+        # can never fit, no matter how many times it retries - fail fast
+        ...mark all pending items FAILED, update stats, return...
+    if not limiter.try_consume(bulk_action.account_id, len(pending)):
         raise self.retry(countdown=60, max_retries=None)
 ```
 
-`max_retries=None` on this specific retry call matters: the task's own
-`retry_kwargs={"max_retries": 3}` is what governs genuine processing
-errors (via `autoretry_for`), but a sustained rate limit should keep
-backing off indefinitely rather than giving up and marking the batch
-`FAILED` after 3 minutes.
+Two things worth calling out, both found by testing this against its
+own edge cases rather than just the happy path:
 
-**Honest caveat**: there's no authentication layer, so `account_id` is
-entirely client-supplied and unverified - any caller can omit it or
-supply a different one to bypass rate limiting for their requests. This
-is a real limitation, not a security boundary yet; it becomes one once
-auth exists and `account_id` is derived from a verified identity instead
-of accepted at face value.
+1. **A batch permanently larger than the limit must fail fast, not
+   retry forever.** The first version only had the `try_consume` check -
+   if a single batch's size (`BATCH_SIZE`) itself exceeds
+   `RATE_LIMIT_PER_MINUTE`, *every* retry attempt reserves the same
+   too-large amount against a freshly-reset budget and gets denied again,
+   forever, with no error ever surfaced - a bulk action silently stuck
+   for good. The size check above catches this specific case and fails
+   those items immediately with a clear message instead. Configure
+   `BATCH_SIZE <= RATE_LIMIT_PER_MINUTE` for any account that will
+   actually be rate-limited, to stay in the "temporarily over budget,
+   retries and succeeds later" case rather than this one.
+2. `max_retries=None` on the genuine retry call matters: the task's own
+   `retry_kwargs={"max_retries": 3}` is what governs actual processing
+   errors (via `autoretry_for`), but a sustained-but-eventually-clearing
+   rate limit should keep backing off indefinitely rather than giving up
+   and marking the batch `FAILED` after 3 minutes.
+
+**Honest caveat**: there's still no authentication layer, so
+`account_id`, while now mandatory, is entirely client-supplied and
+unverified - a caller can still supply any account_id it wants,
+including someone else's. Making it required stops the "just omit it"
+bypass, but this isn't a real security boundary until an auth layer
+exists and `account_id` is derived from a verified identity instead of
+accepted at face value.
 
 ### De-duplication by email
 
